@@ -3,11 +3,30 @@ import { BTCRawInfo } from '@/types/activity';
 import { ChronikClient } from 'chronik-client';
 import { WatchOnlyWallet } from 'ecash-wallet';
 import { getAddress } from '../types/ecash-network';
-import { ECashNetworkInfo, ChronikTx } from '../types/ecash-chronik';
+import {
+  ECashNetworkInfo,
+  ChronikTx,
+  ChronikToken,
+  GenesisInfo,
+  ChronikUtxo,
+} from '../types/ecash-chronik';
 import { Script, Address } from 'ecash-lib';
 import { NetworkNames } from '@enkryptcom/types';
 
 export class ChronikAPI extends ProviderAPIInterface {
+  private static tokenMetadataCache = new Map<
+    string,
+    {
+      tokenId: string;
+      name: string;
+      ticker: string;
+      decimals: number;
+      icon: string;
+      documentUrl: string;
+      documentHash: string;
+    }
+  >();
+
   node: string;
   networkInfo: ECashNetworkInfo;
   private chronik: ChronikClient;
@@ -131,15 +150,184 @@ export class ChronikAPI extends ProviderAPIInterface {
     );
   }
 
+  async getTokenMetadata(tokenId: string): Promise<{
+    tokenId: string;
+    name: string;
+    ticker: string;
+    decimals: number;
+    icon: string;
+    documentUrl: string;
+    documentHash: string;
+  } | null> {
+    if (ChronikAPI.tokenMetadataCache.has(tokenId)) {
+      return ChronikAPI.tokenMetadataCache.get(tokenId)!;
+    }
+
+    try {
+      const tokenInfo = await this.chronik.token(tokenId);
+      const genesisInfo: GenesisInfo = tokenInfo.genesisInfo;
+
+      const name = genesisInfo.tokenName || 'Unknown Token';
+      const ticker = genesisInfo.tokenTicker || '???';
+      const decimals = genesisInfo.decimals ?? 0;
+      const documentUrl = genesisInfo.url || '';
+      const documentHash = genesisInfo.hash || '';
+
+      let icon = '';
+      if (documentUrl && documentUrl.includes('icon')) {
+        icon = documentUrl;
+      }
+
+      const metadata = {
+        tokenId,
+        name,
+        ticker,
+        decimals,
+        icon,
+        documentUrl,
+        documentHash,
+      };
+
+      ChronikAPI.tokenMetadataCache.set(tokenId, metadata);
+
+      return metadata;
+    } catch (error) {
+      console.error(
+        `[getTokenMetadata] Error fetching metadata for ${tokenId}:`,
+        error,
+      );
+      return null;
+    }
+  }
+
+  public static formatTokenBalance(
+    rawBalance: string,
+    decimals: number,
+  ): string {
+    if (decimals === 0) return rawBalance;
+
+    const balanceStr = rawBalance.padStart(decimals + 1, '0');
+    const integerPart = balanceStr.slice(0, -decimals) || '0';
+    const decimalPart = balanceStr.slice(-decimals);
+
+    const trimmedDecimal = decimalPart.replace(/0+$/, '');
+    return trimmedDecimal ? `${integerPart}.${trimmedDecimal}` : integerPart;
+  }
+
+  async getTokenInfo(address: string): Promise<
+    Array<{
+      tokenId: string;
+      name: string;
+      ticker: string;
+      decimals: number;
+      balance: string;
+      formattedBalance: string;
+      documentUrl: string;
+      documentHash: string;
+      tokenType: {
+        protocol: string;
+        type: string;
+        number: number;
+      };
+      icon: string;
+    }>
+  > {
+    try {
+      const addressWithPrefix = address.startsWith('ecash:')
+        ? address
+        : `${this.networkInfo.cashAddrPrefix}:${address}`;
+
+      const utxoResponse = await this.chronik
+        .address(addressWithPrefix)
+        .utxos();
+      const tokenUtxos = utxoResponse.utxos.filter(
+        (utxo: ChronikUtxo) => utxo.token,
+      );
+
+      const tokenMap = new Map<
+        string,
+        {
+          tokenId: string;
+          amount: bigint;
+          tokenType: ChronikToken['tokenType'];
+        }
+      >();
+
+      for (const utxo of tokenUtxos) {
+        if (utxo.token) {
+          const tokenId = utxo.token.tokenId;
+          const amount = utxo.token.atoms;
+
+          if (tokenMap.has(tokenId)) {
+            const existing = tokenMap.get(tokenId)!;
+            existing.amount += amount;
+          } else {
+            tokenMap.set(tokenId, {
+              tokenId,
+              amount,
+              tokenType: utxo.token.tokenType,
+            });
+          }
+        }
+      }
+
+      const tokens = [];
+      for (const [tokenId, tokenData] of tokenMap.entries()) {
+        const metadata = await this.getTokenMetadata(tokenId);
+
+        if (metadata) {
+          const formattedBalance = ChronikAPI.formatTokenBalance(
+            tokenData.amount.toString(),
+            metadata.decimals,
+          );
+
+          const tokenEntry = {
+            tokenId,
+            name: metadata.name,
+            ticker: metadata.ticker,
+            decimals: metadata.decimals,
+            balance: tokenData.amount.toString(),
+            formattedBalance,
+            documentUrl: metadata.documentUrl,
+            documentHash: metadata.documentHash,
+            tokenType: tokenData.tokenType || {
+              protocol: 'SLP',
+              type: 'SLP_TOKEN_TYPE_FUNGIBLE',
+              number: 1,
+            },
+            icon: metadata.icon,
+          };
+
+          tokens.push(tokenEntry);
+        } else {
+          tokens.push({
+            tokenId,
+            name: 'Unknown Token',
+            ticker: tokenId.slice(0, 6) + '...',
+            decimals: 0,
+            balance: tokenData.amount.toString(),
+            formattedBalance: tokenData.amount.toString(),
+            documentUrl: '',
+            documentHash: '',
+            tokenType: tokenData.tokenType || {
+              protocol: 'SLP',
+              type: 'SLP_TOKEN_TYPE_FUNGIBLE',
+              number: 1,
+            },
+            icon: '',
+          });
+        }
+      }
+      return tokens;
+    } catch (error) {
+      console.error('Error fetching tokens:', error);
+      return [];
+    }
+  }
+
   private calculateFee(tx: ChronikTx): number {
-    const inputSum = tx.inputs.reduce(
-      (sum, input) => sum + input.sats,
-      BigInt(0),
-    );
-    const outputSum = tx.outputs.reduce(
-      (sum, output) => sum + output.sats,
-      BigInt(0),
-    );
+    const inputSum = tx.inputs.reduce((sum, input) => sum + input.sats, 0n);
+    const outputSum = tx.outputs.reduce((sum, output) => sum + output.sats, 0n);
     return Number(inputSum - outputSum);
   }
 
