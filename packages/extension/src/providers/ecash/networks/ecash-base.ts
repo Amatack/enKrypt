@@ -123,6 +123,7 @@ export class ECashNetwork extends BaseNetwork {
           decimals: token.decimals,
           price: token.value,
           coingeckoID: this.coingeckoID,
+          contract: token.contract || '', //tokenId
         }),
     );
   }
@@ -180,6 +181,38 @@ export class ECashNetwork extends BaseNetwork {
       };
 
       const allAssets: AssetsType[] = [nativeAsset];
+
+      // Get eTokens (SLP tokens) from Chronik
+      try {
+        const address = getAddress(pubkey, this.cashAddrPrefix);
+        const eTokens = await api.getTokenInfo(address);
+
+        const fallbackTokenIcon = (tokenId: string) => createIcon(tokenId);
+        for (const token of eTokens) {
+          const tokenAsset: AssetsType = {
+            balance: token.balance, // BASE units (not formatted)
+            balancef: token.formattedBalance,
+            balanceUSD: 0,
+            balanceUSDf: '0.00',
+            icon: fallbackTokenIcon(token.tokenId) || this.icon,
+            name: token.name,
+            symbol: token.ticker,
+            value: '0',
+            valuef: '0.00',
+            contract: token.tokenId,
+            decimals: token.decimals,
+            sparkline: '',
+            priceChangePercentage: 0,
+          };
+
+          allAssets.push(tokenAsset);
+        }
+      } catch (tokenError) {
+        console.error(
+          '⚠️ [getAllTokenInfo] Error fetching eTokens:',
+          tokenError,
+        );
+      }
 
       return allAssets;
     } catch (error) {
