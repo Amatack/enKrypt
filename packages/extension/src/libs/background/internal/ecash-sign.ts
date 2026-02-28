@@ -55,29 +55,74 @@ const ecashSign = async (
       return { error: getCustomError('ecash-sign: unknown network') };
     }
 
-    privateKeyBuffer = await keyring.getPrivateKeyForECash(
-      params.account,
-    );
+    privateKeyBuffer = await keyring.getPrivateKeyForECash(params.account);
     pkBytes = new Uint8Array(privateKeyBuffer);
     const chronik = new ChronikClient([network.node]);
     const wallet = Wallet.fromSk(pkBytes, chronik);
     await wallet.sync();
 
     const amountBigInt = BigInt(params.amount);
+    let action;
 
-    const balance = wallet
-      .spendableSatsOnlyUtxos()
-      .reduce((total, utxo) => total + utxo.sats, 0n);
-
-    if (amountBigInt > balance) {
-      throw new Error(
-        `Insufficient balance: ${balance} sats available, ${amountBigInt} sats requested`,
+    if (params.tokenId) {
+      // eToken transaction (SLP / ALP)
+      const tokenUtxos = (wallet.utxos || []).filter(
+        utxo => utxo?.token?.tokenId === params.tokenId,
       );
+
+      const tokenBalance = tokenUtxos.reduce(
+        (total, utxo) => total + (utxo.token?.atoms ?? 0n),
+        0n,
+      );
+
+      if (tokenBalance < amountBigInt) {
+        throw new Error(
+          `Insufficient token balance: need ${amountBigInt}, have ${tokenBalance}`,
+        );
+      }
+
+      // Detect token protocol (SLP/ALP) from UTXO data
+      const tokenType = (tokenUtxos[0]?.token as any)?.tokenType ?? {
+        protocol: 'SLP',
+        type: 'SLP_TOKEN_TYPE_FUNGIBLE',
+        number: 1,
+      };
+
+      action = wallet.action({
+        outputs: [
+          { sats: 0n },
+          {
+            address: params.toAddress,
+            sats: 546n,
+            tokenId: params.tokenId,
+            atoms: amountBigInt,
+          },
+        ],
+        tokenActions: [
+          {
+            type: 'SEND',
+            tokenId: params.tokenId,
+            tokenType,
+          },
+        ],
+      });
+    } else {
+      // XEC transaction
+      const balance = wallet
+        .spendableSatsOnlyUtxos()
+        .reduce((total, utxo) => total + utxo.sats, 0n);
+
+      if (amountBigInt > balance) {
+        throw new Error(
+          `Insufficient balance: ${balance} sats available, ${amountBigInt} sats requested`,
+        );
+      }
+
+      action = wallet.action({
+        outputs: [{ address: params.toAddress, sats: amountBigInt }],
+      });
     }
 
-    const action = wallet.action({
-      outputs: [{ address: params.toAddress, sats: amountBigInt }],
-    });
     const built = action.build();
     const result = await built.broadcast();
 

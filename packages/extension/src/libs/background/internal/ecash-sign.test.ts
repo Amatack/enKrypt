@@ -83,6 +83,29 @@ const createKeyring = (overrides: Record<string, any> = {}) =>
     ...overrides,
   }) as any;
 
+const TEST_TOKEN_ID =
+  'aabbccddee00112233445566778899aabbccddee00112233445566778899aabb';
+
+const pushTokenUtxos = (
+  tokenId: string,
+  atoms: bigint,
+  count = 1,
+  protocol = 'SLP',
+  type = 'SLP_TOKEN_TYPE_FUNGIBLE',
+  number = 1,
+) => {
+  for (let i = 0; i < count; i++) {
+    mockUtxos.push({
+      sats: 546n,
+      token: {
+        tokenId,
+        atoms: atoms / BigInt(count),
+        tokenType: { protocol, type, number },
+      },
+    });
+  }
+};
+
 describe('ecashSign', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -97,6 +120,10 @@ describe('ecashSign', () => {
       name: NetworkNames.ECash,
     });
   });
+
+  // ===================================================================
+  // XEC transaction tests (existing)
+  // ===================================================================
 
   it('should return error when params is undefined', async () => {
     const keyring = createKeyring();
@@ -332,5 +359,326 @@ describe('ecashSign', () => {
 
     expect(result.error).toBeDefined();
     expect(result.error!.message).toContain('Keyring error');
+  });
+
+  // ===================================================================
+  // eToken (SLP / ALP) transaction tests
+  // ===================================================================
+
+  describe('eToken transactions', () => {
+    it('should build and broadcast a successful SLP token send', async () => {
+      const keyring = createKeyring();
+      pushTokenUtxos(TEST_TOKEN_ID, 500000n);
+      mockBroadcast.mockResolvedValue({
+        success: true,
+        broadcasted: ['txid_token_slp'],
+      });
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '100000',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeUndefined();
+      const parsed = JSON.parse(result.result!);
+      expect(parsed.txid).toBe('txid_token_slp');
+
+      expect(mockSync).toHaveBeenCalled();
+      expect(mockAction).toHaveBeenCalledWith({
+        outputs: [
+          { sats: 0n },
+          {
+            address: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            sats: 546n,
+            tokenId: TEST_TOKEN_ID,
+            atoms: 100000n,
+          },
+        ],
+        tokenActions: [
+          {
+            type: 'SEND',
+            tokenId: TEST_TOKEN_ID,
+            tokenType: {
+              protocol: 'SLP',
+              type: 'SLP_TOKEN_TYPE_FUNGIBLE',
+              number: 1,
+            },
+          },
+        ],
+      });
+    });
+
+    it('should build and broadcast a successful ALP token send', async () => {
+      const keyring = createKeyring();
+      pushTokenUtxos(
+        TEST_TOKEN_ID,
+        200000n,
+        1,
+        'ALP',
+        'ALP_TOKEN_TYPE_STANDARD',
+        0,
+      );
+      mockBroadcast.mockResolvedValue({
+        success: true,
+        broadcasted: ['txid_token_alp'],
+      });
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '50000',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeUndefined();
+      const parsed = JSON.parse(result.result!);
+      expect(parsed.txid).toBe('txid_token_alp');
+
+      expect(mockAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tokenActions: [
+            {
+              type: 'SEND',
+              tokenId: TEST_TOKEN_ID,
+              tokenType: {
+                protocol: 'ALP',
+                type: 'ALP_TOKEN_TYPE_STANDARD',
+                number: 0,
+              },
+            },
+          ],
+        }),
+      );
+    });
+
+    it('should return error when token balance is insufficient', async () => {
+      const keyring = createKeyring();
+      pushTokenUtxos(TEST_TOKEN_ID, 500n);
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '10000',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeDefined();
+      expect(result.error!.message).toContain('Insufficient token balance');
+      expect(result.error!.message).toContain('10000');
+      expect(result.error!.message).toContain('500');
+    });
+
+    it('should aggregate atoms across multiple token UTXOs', async () => {
+      const keyring = createKeyring();
+      pushTokenUtxos(TEST_TOKEN_ID, 3000n, 3);
+      mockBroadcast.mockResolvedValue({
+        success: true,
+        broadcasted: ['txid_multi_utxo'],
+      });
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '2500',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeUndefined();
+      const parsed = JSON.parse(result.result!);
+      expect(parsed.txid).toBe('txid_multi_utxo');
+    });
+
+    it('should only count UTXOs matching the requested tokenId', async () => {
+      const keyring = createKeyring();
+      const OTHER_TOKEN_ID =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+
+      pushTokenUtxos(TEST_TOKEN_ID, 100n);
+      pushTokenUtxos(OTHER_TOKEN_ID, 999999n);
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '500',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeDefined();
+      expect(result.error!.message).toContain('Insufficient token balance');
+    });
+
+    it('should handle zero token UTXOs (no UTXOs for requested token)', async () => {
+      const keyring = createKeyring();
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '1',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeDefined();
+      expect(result.error!.message).toContain('Insufficient token balance');
+    });
+
+    it('should use default SLP token type when UTXO has no tokenType', async () => {
+      const keyring = createKeyring();
+      mockUtxos.push({
+        sats: 546n,
+        token: {
+          tokenId: TEST_TOKEN_ID,
+          atoms: 10000n,
+        },
+      });
+      mockBroadcast.mockResolvedValue({
+        success: true,
+        broadcasted: ['txid_default_type'],
+      });
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '5000',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(mockAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tokenActions: [
+            {
+              type: 'SEND',
+              tokenId: TEST_TOKEN_ID,
+              tokenType: {
+                protocol: 'SLP',
+                type: 'SLP_TOKEN_TYPE_FUNGIBLE',
+                number: 1,
+              },
+            },
+          ],
+        }),
+      );
+    });
+
+    it('should return error when token broadcast fails', async () => {
+      const keyring = createKeyring();
+      pushTokenUtxos(TEST_TOKEN_ID, 10000n);
+      mockBroadcast.mockResolvedValue({
+        success: false,
+        errors: ['slp-invalid: bad token inputs'],
+      });
+
+      const result = await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '5000',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      expect(result.error).toBeDefined();
+      expect(result.error!.message).toContain('slp-invalid: bad token inputs');
+    });
+
+    it('should include dust output (sats: 0n) as first output for token tx', async () => {
+      const keyring = createKeyring();
+      pushTokenUtxos(TEST_TOKEN_ID, 10000n);
+      mockBroadcast.mockResolvedValue({
+        success: true,
+        broadcasted: ['txid_dust_check'],
+      });
+
+      await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '1000',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      const actionCall = mockAction.mock.calls[0][0];
+      expect(actionCall.outputs[0]).toEqual({ sats: 0n });
+      expect(actionCall.outputs[1].sats).toBe(546n);
+      expect(actionCall.outputs[1].tokenId).toBe(TEST_TOKEN_ID);
+    });
+
+    it('should send the exact requested atom amount in the output', async () => {
+      const keyring = createKeyring();
+      pushTokenUtxos(TEST_TOKEN_ID, 999999n);
+      mockBroadcast.mockResolvedValue({
+        success: true,
+        broadcasted: ['txid_exact_atoms'],
+      });
+
+      await ecashSign(
+        keyring,
+        makeMessage([
+          {
+            toAddress: 'ecash:qqq9wk7vze4dc4hk7mweafpyxh7d8sjr3ghh0wtn04',
+            amount: '123456',
+            account: baseAccount,
+            networkName: NetworkNames.ECash,
+            tokenId: TEST_TOKEN_ID,
+          },
+        ]),
+      );
+
+      const actionCall = mockAction.mock.calls[0][0];
+      expect(actionCall.outputs[1].atoms).toBe(123456n);
+    });
   });
 });
