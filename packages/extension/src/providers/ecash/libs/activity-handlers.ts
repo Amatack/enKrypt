@@ -6,12 +6,12 @@ import { ChronikAPI } from './api-chronik';
 import MarketData from '@/libs/market-data';
 import {
   scriptToAddress,
-  extractSats,
-  calculateTransactionValue,
   calculateOnchainTxFee,
   getTransactionAddresses,
   getTransactionTimestamp,
   getAddressWithoutPrefix,
+  calculateTransactionValue,
+  sumTokenOutputAtoms,
 } from './utils';
 
 export const chronikHandler: ActivityHandlerType = async (
@@ -45,31 +45,92 @@ export const chronikHandler: ActivityHandlerType = async (
 
     for (const tx of txHistory) {
       try {
-        const isReceive = tx.outputs.some((output: any) => {
-          const outputAddress = scriptToAddress(
-            output.outputScript,
-            cashAddrPrefix,
-          );
-          return outputAddress === normalizedAddress;
-        });
+        const hasTokenOutputs = tx.outputs.some(
+          (output: TxOutput) => output.token,
+        );
+        const hasTokenInputs = tx.inputs.some((input: TxInput) => input.token);
+        const isTokenTx = hasTokenOutputs || hasTokenInputs;
 
-        const isSend = tx.inputs.some((input: any) => {
-          const inputAddress = scriptToAddress(
-            input.outputScript ?? '',
-            cashAddrPrefix,
-          );
-          return inputAddress === normalizedAddress;
-        });
+        // Compute isReceive/isSend with fewer conversions
+        const outputAddresses = new Set(
+          tx.outputs.map((o: TxOutput) =>
+            scriptToAddress(o.outputScript, cashAddrPrefix),
+          ),
+        );
+        const inputAddresses = new Set(
+          tx.inputs.map((i: TxInput) =>
+            scriptToAddress(i.outputScript ?? '', cashAddrPrefix),
+          ),
+        );
 
-        const value =
-          isReceive || isSend
-            ? calculateTransactionValue(
-                tx.outputs,
-                normalizedAddress,
-                isReceive,
+        const isReceive = outputAddresses.has(normalizedAddress);
+        const isSend = inputAddresses.has(normalizedAddress);
+
+        let tokenId: string | null = null;
+        let tokenMetadata: {
+          name: string;
+          ticker: string;
+          decimals: number;
+          icon: string;
+        } | null = null;
+
+        let value = '0';
+
+        if (isTokenTx) {
+          if (isReceive) {
+            const tokenOutputsToUs = tx.outputs.filter((output: TxOutput) => {
+              const outputAddress = scriptToAddress(
+                output.outputScript,
                 cashAddrPrefix,
-              )
-            : '0';
+              );
+              return outputAddress === normalizedAddress && output.token;
+            });
+
+            if (tokenOutputsToUs.length > 0) {
+              tokenId = tokenOutputsToUs[0].token?.tokenId ?? null;
+              value = sumTokenOutputAtoms(tokenOutputsToUs);
+            }
+          } else if (isSend) {
+            const tokenOutputsToOthers = tx.outputs.filter(
+              (output: TxOutput) => {
+                const outputAddress = scriptToAddress(
+                  output.outputScript,
+                  cashAddrPrefix,
+                );
+                return outputAddress !== normalizedAddress && output.token;
+              },
+            );
+
+            if (tokenOutputsToOthers.length > 0) {
+              tokenId = tokenOutputsToOthers[0].token?.tokenId ?? null;
+              value = sumTokenOutputAtoms(tokenOutputsToOthers);
+            }
+          }
+        }
+
+        // Single calculateTransactionValue call (for non-token OR token txs without resolved tokenId)
+        if (!tokenId) {
+          if (isReceive || isSend) {
+            value = calculateTransactionValue(
+              tx.outputs,
+              normalizedAddress,
+              isReceive,
+              cashAddrPrefix,
+            );
+          }
+        }
+
+        if (tokenId) {
+          const metadata = await api.getTokenMetadata(tokenId);
+          if (metadata) {
+            tokenMetadata = {
+              name: metadata.name,
+              ticker: metadata.ticker,
+              decimals: metadata.decimals,
+              icon: metadata.icon,
+            };
+          }
+        }
 
         const { fromAddress, toAddress } = getTransactionAddresses(
           tx,
@@ -93,24 +154,32 @@ export const chronikHandler: ActivityHandlerType = async (
           fee,
           transactionHash: tx.txid,
           timestamp,
-          inputs: tx.inputs.map((input: any) => ({
+          inputs: tx.inputs.map((input: TxInput) => ({
             address: scriptToAddress(input.outputScript ?? '', cashAddrPrefix),
-            value: Number(extractSats(input)),
+            value: Number(input.sats),
           })),
-          outputs: tx.outputs.map((output: any) => ({
+          outputs: tx.outputs.map((output: TxOutput) => ({
             address: scriptToAddress(output.outputScript, cashAddrPrefix),
-            value: Number(extractSats(output)),
-            pkscript: output.outputScript || '',
+            value: Number(output.sats),
+            pkscript: output.outputScript,
           })),
         };
 
-        const tokenInfo = {
-          decimals: network.decimals,
-          icon: network.icon,
-          symbol: network.currencyName,
-          name: network.currencyNameLong,
-          price: currentPrice.toString(),
-        };
+        const tokenInfo = tokenMetadata
+          ? {
+              decimals: tokenMetadata.decimals,
+              icon: tokenMetadata.icon || network.icon,
+              symbol: tokenMetadata.ticker,
+              name: tokenMetadata.name,
+              price: '0',
+            }
+          : {
+              decimals: network.decimals,
+              icon: network.icon,
+              symbol: network.currencyName,
+              name: network.currencyNameLong,
+              price: currentPrice.toString(),
+            };
 
         const activity: Activity = {
           from: fromAddress,

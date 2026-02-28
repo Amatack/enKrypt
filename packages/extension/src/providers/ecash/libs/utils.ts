@@ -136,3 +136,10 @@ export function getAddressWithoutPrefix(address: Address | string): string {
     typeof address === 'string' ? address : address.toString();
   return fullAddress.replace(/^\w+:/, '');
 }
+
+export function sumTokenOutputAtoms(outputs: any[]): string {
+  return outputs.reduce((sum: string, output: any) => {
+    const atoms = output.token?.atoms ?? 0n;
+    return toBN(sum).add(toBN(atoms.toString())).toString();
+  }, '0');
+}
