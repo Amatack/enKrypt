@@ -34,18 +34,18 @@ export const calculateTransactionFee = (
   const {
     sendAmount,
     accountUTXOs,
+    isEToken,
     selectedAsset,
     networkDecimals,
     fallbackByteSize = 219,
   } = params;
 
-  let feeInXEC: string = '';
-  let txSize: number;
+  const defaultFallback = isEToken ? 480 : fallbackByteSize;
 
   if (!sendAmount || sendAmount === '0' || accountUTXOs.length === 0) {
     return {
-      feeInXEC: fromBase(fallbackByteSize.toString(), networkDecimals),
-      txSize: fallbackByteSize,
+      feeInXEC: fromBase(defaultFallback.toString(), networkDecimals),
+      txSize: defaultFallback,
     };
   }
 
@@ -60,6 +60,15 @@ export const calculateTransactionFee = (
         return 0;
       });
 
+    if (isEToken) {
+      const result = calculateETokenFee(
+        sendAmount,
+        selectedAsset,
+        networkDecimals,
+      );
+      return result;
+    }
+
     const result = calculateNativeXECFee(
       sendAmount,
       nonTokenUTXOs,
@@ -67,20 +76,39 @@ export const calculateTransactionFee = (
       networkDecimals,
     );
 
-    txSize = result.txSize!;
-    feeInXEC = result.feeInXEC;
-
-    return { feeInXEC, txSize };
+    return { feeInXEC: result.feeInXEC, txSize: result.txSize };
   } catch (error) {
     console.warn(
       '⚠️ [calculateTransactionFee] Error calculating fee, using estimate:',
       error,
     );
     return {
-      feeInXEC: fromBase(fallbackByteSize.toString(), networkDecimals),
-      txSize: fallbackByteSize,
+      feeInXEC: fromBase(defaultFallback.toString(), networkDecimals),
+      txSize: defaultFallback,
     };
   }
+};
+
+const calculateETokenFee = (
+  sendAmount: string,
+  selectedAsset: { balance?: string; decimals: number },
+  networkDecimals: number,
+): FeeCalculationResult => {
+  const opReturnSize = 55;
+  const totalInputs = 2;
+  let numOutputs = 2;
+
+  const tokenBalance = selectedAsset.balance || '0';
+  const sendingAmount = toBase(sendAmount, selectedAsset.decimals);
+  if (BigInt(sendingAmount) < BigInt(tokenBalance)) {
+    numOutputs++;
+  }
+  numOutputs++;
+
+  const txSize = 10 + totalInputs * 141 + numOutputs * 34 + opReturnSize;
+  const feeInXEC = fromBase(txSize.toString(), networkDecimals);
+
+  return { feeInXEC, txSize };
 };
 
 const calculateNativeXECFee = (

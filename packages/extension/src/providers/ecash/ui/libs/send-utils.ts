@@ -26,9 +26,17 @@ export const calculateBalanceAfterTransaction = (
   assetDecimals: number,
   networkDecimals: number,
   isValidAmount: boolean,
+  isEToken: boolean = false,
 ): ReturnType<typeof toBN> => {
   if (!isValidAmount) {
     return toBN(0);
+  }
+
+  if (isEToken) {
+    const dustForTokenOutputs = toBN(546 * 2);
+    return utxoBalance
+      .sub(dustForTokenOutputs)
+      .sub(toBN(toBase(fee, networkDecimals)));
   }
 
   return utxoBalance
@@ -50,7 +58,13 @@ export const calculateMaxSendableValue = (
   fee: string,
   networkDecimals: number,
   assetDecimals: number,
+  isEToken: boolean = false,
+  tokenBalance: string = '0',
 ): string => {
+  if (isEToken) {
+    return fromBase(tokenBalance, assetDecimals);
+  }
+
   const maxValue = utxoBalance.sub(toBN(toBase(fee, networkDecimals)));
   return fromBase(maxValue.toString(), assetDecimals);
 };

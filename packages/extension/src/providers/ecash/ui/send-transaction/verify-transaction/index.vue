@@ -31,7 +31,7 @@
             :network="network"
           />
           <verify-transaction-amount :token="txData.toToken" />
-          <verify-transaction-fee :fee="txData.gasFee" />
+          <verify-transaction-fee v-if="!isEToken" :fee="txData.gasFee" />
 
           <div v-if="errorMsg" class="verify-transaction__error">
             {{ errorMsg }}
@@ -102,6 +102,7 @@ import { trackSendEvents } from '@/libs/metrics';
 import { SendEventType } from '@/libs/metrics/types';
 import sendUsingInternalMessengers from '@/libs/messenger/internal-messenger';
 import { InternalMethods } from '@/types/messenger';
+import { ECashSignParams } from '@/providers/ecash/types/ecash-sign';
 
 const POPUP_CLOSE_DELAY = 4500;
 const WINDOW_CLOSE_DELAY = 1500;
@@ -114,6 +115,9 @@ const selectedNetwork: string = route.query.id as string;
 const txData: VerifyTransactionParams = JSON.parse(
   Buffer.from(route.query.txData as string, 'base64').toString('utf8'),
 );
+
+const parsedTxInfo = JSON.parse(txData.TxInfo);
+const isEToken = !!parsedTxInfo.tokenId;
 
 const isProcessing = ref(false);
 const network = ref<ECashNetwork>();
@@ -195,11 +199,12 @@ const sendAction = async () => {
   const activityState = new ActivityState();
 
   try {
-    const signParams: any = {
+    const signParams: ECashSignParams = {
       toAddress: txData.toAddress,
       amount: txData.toToken.amount,
       account: account.value,
       networkName: network.value.name,
+      ...(parsedTxInfo.tokenId ? { tokenId: parsedTxInfo.tokenId } : {}),
     };
 
     const result = await sendUsingInternalMessengers({
