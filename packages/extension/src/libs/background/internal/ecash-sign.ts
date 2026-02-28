@@ -1,23 +1,12 @@
 import { getCustomError } from '@/libs/error';
 import KeyRingBase from '@/libs/keyring/keyring';
 import { InternalOnMessageResponse } from '@/types/messenger';
-import {
-  EnkryptAccount,
-  RPCRequestType,
-  HWwalletType,
-  NetworkNames,
-} from '@enkryptcom/types';
+import { RPCRequestType, HWwalletType } from '@enkryptcom/types';
 import { ChronikClient } from 'chronik-client';
 import { Wallet } from 'ecash-wallet';
 import { getNetworkByName } from '@/libs/utils/networks';
 import { isValidECashAddress } from '@/providers/ecash/libs/utils';
-
-interface ECashSignParams {
-  toAddress: string;
-  amount: string;
-  account: EnkryptAccount;
-  networkName: NetworkNames;
-}
+import { ECashSignParams } from '@/providers/ecash/types/ecash-sign';
 
 const ecashSign = async (
   keyring: KeyRingBase,
