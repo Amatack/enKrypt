@@ -1,6 +1,7 @@
 import type { Activity, BTCRawInfo } from '@/types/activity';
 import { ActivityStatus, ActivityType } from '@/types/activity';
 import type { ActivityHandlerType } from '@/libs/activity-state/types';
+import type { TxOutput, TxInput } from 'chronik-client';
 import { ChronikAPI } from './api-chronik';
 import MarketData from '@/libs/market-data';
 import {
